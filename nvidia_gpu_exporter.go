@@ -1,9 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
@@ -24,13 +26,16 @@ const (
 )
 
 var (
-	labels = []string{"minor_number", "uuid", "name"}
+	deviceLabels = []string{"minor_number", "uuid", "name"}
+
+	gpuInfoLabels = []string{"driver_version"}
 )
 
 type Exporter struct {
 	sync.Mutex
 	logger log.Logger
 
+	gpuInfo     *prometheus.Desc
 	numDevices  prometheus.Gauge
 	usedMemory  *prometheus.GaugeVec
 	totalMemory *prometheus.GaugeVec
@@ -43,6 +48,12 @@ type Exporter struct {
 func NewExporter(logger log.Logger) *Exporter {
 	return &Exporter{
 		logger: logger,
+		gpuInfo: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "", "gpu_info"),
+			fmt.Sprintf("A metric with a constant '1' value labeled by gpu %s.", strings.Join(gpuInfoLabels, ", ")),
+			gpuInfoLabels,
+			nil,
+		),
 		numDevices: prometheus.NewGauge(
 			prometheus.GaugeOpts{
 				Namespace: namespace,
@@ -56,7 +67,7 @@ func NewExporter(logger log.Logger) *Exporter {
 				Name:      "memory_used_bytes",
 				Help:      "Memory used by the GPU device in bytes",
 			},
-			labels,
+			deviceLabels,
 		),
 		totalMemory: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -64,7 +75,7 @@ func NewExporter(logger log.Logger) *Exporter {
 				Name:      "memory_total_bytes",
 				Help:      "Total memory of the GPU device in bytes",
 			},
-			labels,
+			deviceLabels,
 		),
 		dutyCycle: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -72,7 +83,7 @@ func NewExporter(logger log.Logger) *Exporter {
 				Name:      "duty_cycle",
 				Help:      "Percent of time over the past sample period during which one or more kernels were executing on the GPU device",
 			},
-			labels,
+			deviceLabels,
 		),
 		powerUsage: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -80,7 +91,7 @@ func NewExporter(logger log.Logger) *Exporter {
 				Name:      "power_usage_milliwatts",
 				Help:      "Power usage of the GPU device in milliwatts",
 			},
-			labels,
+			deviceLabels,
 		),
 		temperature: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -88,7 +99,7 @@ func NewExporter(logger log.Logger) *Exporter {
 				Name:      "temperature_celsius",
 				Help:      "Temperature of the GPU device in celsius",
 			},
-			labels,
+			deviceLabels,
 		),
 		fanSpeed: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -96,13 +107,15 @@ func NewExporter(logger log.Logger) *Exporter {
 				Name:      "fanspeed_percent",
 				Help:      "Fanspeed of the GPU device as a percent of its maximum",
 			},
-			labels,
+			deviceLabels,
 		),
 	}
 }
 
 func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
+	ch <- e.gpuInfo
 	ch <- e.numDevices.Desc()
+
 	e.usedMemory.Describe(ch)
 	e.totalMemory.Describe(ch)
 	e.dutyCycle.Describe(ch)
@@ -121,6 +134,13 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	e.powerUsage.Reset()
 	e.temperature.Reset()
 	e.fanSpeed.Reset()
+
+	driverVersion, ret := nvml.SystemGetDriverVersion()
+	if ret != nvml.SUCCESS {
+		level.Error(e.logger).Log("msg", "Unable to get system driver version", "err", nvml.ErrorString(ret))
+	} else {
+		ch <- prometheus.MustNewConstMetric(e.gpuInfo, prometheus.GaugeValue, 1, driverVersion)
+	}
 
 	numDevices, ret := nvml.DeviceGetCount()
 	if ret != nvml.SUCCESS {
